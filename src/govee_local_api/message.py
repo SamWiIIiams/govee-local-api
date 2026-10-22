@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from typing import Any, TypeVar
 
 from .light_capabilities import DEFAULT_TEMPERATURE_RANGE
@@ -177,6 +178,74 @@ def segment_brightness_frame(segment: bytes, brightness: int) -> bytes:
     percent = max(0, min(int(brightness), 100))
     data = b"\x33\x05\x15\x02" + bytes([percent]) + segment
     return data + b"\x00" * (19 - len(data))
+
+
+def kelvin_to_rgb(kelvin: int) -> tuple[int, int, int]:
+    """Approximate RGB of a colour temperature (Tanner Helland's fit)."""
+    t = kelvin / 100.0
+    if t <= 66:
+        red = 255.0
+        green = 99.4708025861 * math.log(t) - 161.1195681661
+        blue = 0.0 if t <= 19 else 138.5177312231 * math.log(t - 10) - 305.0447927307
+    else:
+        red = 329.698727446 * (t - 60) ** -0.1332047592
+        green = 288.1221695283 * (t - 60) ** -0.0755148492
+        blue = 255.0
+    r, g, b = (max(0, min(255, int(c))) for c in (red, green, blue))
+    return r, g, b
+
+
+def _zone_frame(*data: int) -> bytes:
+    return bytes(data) + b"\x00" * (19 - len(data))
+
+
+def zone_power_frame(zone: int, on: bool) -> bytes:
+    """Zone on/off frame (before checksum): ``33 30 <zone> 01|00``."""
+    return _zone_frame(0x33, 0x30, zone, 1 if on else 0)
+
+
+def zone_color_frame(
+    zone: int, color: tuple[int, int, int], mask: int | None = None
+) -> bytes:
+    """Zone colour frame (before checksum): ``33 05 2c <zone> 01 RR GG BB 00 00 [<mask>]``.
+
+    Zones with segments need the one-byte segment mask; without it the
+    device ignores the frame.
+    """
+    r, g, b = (max(0, min(c, 255)) for c in color)
+    extra = () if mask is None else (mask & 0xFF,)
+    return _zone_frame(0x33, 0x05, 0x2C, zone, 0x01, r, g, b, 0, 0, *extra)
+
+
+def zone_temperature_frame(
+    zone: int, temperature: int, *, rgb: bool = True, mask: int | None = None
+) -> bytes:
+    """Zone white-temperature frame (before checksum).
+
+    Colour zones take ``33 05 2c <zone> 01 RR GG BB KK KK [<mask>]`` with an
+    RGB approximation of the temperature, as the Govee app sends. White-only
+    zones take ``33 05 2c <zone> 01 KK KK``: colour bytes black them out.
+    """
+    kelvin = max(0, min(int(temperature), 0xFFFF))
+    if not rgb:
+        return _zone_frame(0x33, 0x05, 0x2C, zone, 0x01, kelvin >> 8, kelvin & 0xFF)
+    r, g, b = kelvin_to_rgb(kelvin)
+    extra = () if mask is None else (mask & 0xFF,)
+    return _zone_frame(
+        0x33, 0x05, 0x2C, zone, 0x01, r, g, b, kelvin >> 8, kelvin & 0xFF, *extra
+    )
+
+
+def zone_brightness_frame(zone: int, brightness: int, mask: int | None = None) -> bytes:
+    """Zone brightness frame (before checksum): ``33 05 2c <zone> 02 <pct> [<mask>]``."""
+    percent = max(0, min(int(brightness), 100))
+    extra = () if mask is None else (mask & 0xFF,)
+    return _zone_frame(0x33, 0x05, 0x2C, zone, 0x02, percent, *extra)
+
+
+def zone_flow_frame(zone: int, flow: int) -> bytes:
+    """Zone flow-rate frame (before checksum): ``33 05 2c <zone> 03 <0-100>``."""
+    return _zone_frame(0x33, 0x05, 0x2C, zone, 0x03, max(0, min(int(flow), 100)))
 
 
 class SegmentColorMessages(PtRealMessage):

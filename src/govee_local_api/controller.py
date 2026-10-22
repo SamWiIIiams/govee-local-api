@@ -13,12 +13,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
-from .device import GoveeDevice, SegmentUpdate
+from .device import GoveeDevice, SegmentUpdate, ZoneUpdate
 from .device_registry import DeviceRegistry
 from .light_capabilities import (
     GOVEE_LIGHT_CAPABILITIES,
     ON_OFF_CAPABILITIES,
     GoveeLightFeatures,
+    GoveeZone,
 )
 from .message import (
     HexMessage,
@@ -40,6 +41,11 @@ from .message import (
     segment_brightness_frame,
     segment_color_frame,
     segment_temperature_frame,
+    zone_brightness_frame,
+    zone_color_frame,
+    zone_flow_frame,
+    zone_power_frame,
+    zone_temperature_frame,
 )
 from .network import (
     _parse_listening_addresses,
@@ -793,28 +799,17 @@ class GoveeController:
         Segments that share a setting are merged into one frame by OR-ing their
         masks, and packets are capped at ``MAX_FRAMES_PER_PTREAL`` frames.
         """
-        min_kelvin, max_kelvin = device.temperature_range
-        colors: dict[tuple, int] = {}
-        levels: dict[int, int] = {}
         width = 0
-        for update in updates:
-            segment_data = self._segment_code(device, update.segment)
+
+        def bit_of(segment: int) -> int | None:
+            nonlocal width
+            segment_data = self._segment_code(device, segment)
             if segment_data is None:
-                continue
+                return None
             width = max(width, len(segment_data))
-            bit = int.from_bytes(segment_data, "little")
-            if update.temperature is not None:
-                kelvin = max(min_kelvin, min(int(update.temperature), max_kelvin))
-                key: tuple = ("temperature", kelvin)
-            elif update.rgb is not None:
-                key = ("rgb", *(max(0, min(c, 255)) for c in update.rgb))
-            else:
-                key = ()
-            if key:
-                colors[key] = colors.get(key, 0) | bit
-            if update.brightness is not None:
-                level = max(0, min(int(update.brightness), 100))
-                levels[level] = levels.get(level, 0) | bit
+            return int.from_bytes(segment_data, "little")
+
+        colors, levels = self._group_segment_updates(device, updates, bit_of)
 
         def mask(bits: int) -> bytes:
             return bits.to_bytes(width, "little")
@@ -831,10 +826,142 @@ class GoveeController:
             segment_brightness_frame(mask(bits), level)
             for level, bits in levels.items()
         ]
+        self._send_frames(frames, device)
+
+    def _group_segment_updates(
+        self,
+        device: GoveeDevice,
+        updates: Sequence[SegmentUpdate],
+        bit_of: Callable[[int], int | None],
+    ) -> tuple[dict[tuple, int], dict[int, int]]:
+        """Group segment updates by setting: ({colour key: mask}, {brightness: mask})."""
+        min_kelvin, max_kelvin = device.temperature_range
+        colors: dict[tuple, int] = {}
+        levels: dict[int, int] = {}
+        for update in updates:
+            bit = bit_of(update.segment)
+            if bit is None:
+                continue
+            if update.temperature is not None:
+                kelvin = max(min_kelvin, min(int(update.temperature), max_kelvin))
+                key: tuple = ("temperature", kelvin)
+            elif update.rgb is not None:
+                key = ("rgb", *(max(0, min(c, 255)) for c in update.rgb))
+            else:
+                key = ()
+            if key:
+                colors[key] = colors.get(key, 0) | bit
+            if update.brightness is not None:
+                level = max(0, min(int(update.brightness), 100))
+                levels[level] = levels.get(level, 0) | bit
+        return colors, levels
+
+    def _send_frames(self, frames: list[bytes], device: GoveeDevice) -> None:
         for i in range(0, len(frames), MAX_FRAMES_PER_PTREAL):
             self._send_message(
                 PtRealMessage(frames[i : i + MAX_FRAMES_PER_PTREAL]), device
             )
+
+    def _zone(self, device: GoveeDevice, zone: int) -> GoveeZone | None:
+        """The zone's description, or None (with a warning) if it doesn't exist."""
+        zones = device.capabilities.zones if device.capabilities else ()
+        if not 1 <= zone <= len(zones):
+            self._logger.warning("Zone %s is not valid for device %s", zone, device)
+            return None
+        return zones[zone - 1]
+
+    async def set_zones(
+        self, device: GoveeDevice, updates: Sequence[ZoneUpdate]
+    ) -> None:
+        """Switch and set the zones of a multi-zone light in as few packets as possible.
+
+        Zones switched off go first. Switching a zone on while the model's
+        ``max_zones_on`` zones are already lit first switches off the one lit
+        longest, preferring zones that aren't switched on in the same call.
+        """
+        valid = [(u, z) for u in updates if (z := self._zone(device, u.zone))]
+        min_kelvin, max_kelvin = device.temperature_range
+        limit = device.capabilities.max_zones_on
+        frames: list[bytes] = []
+        for update, _ in valid:
+            if update.on is False:
+                frames.append(zone_power_frame(update.zone, False))
+                device.set_zone_state(update.zone, False)
+        switching_on = {u.zone for u, _ in valid if u.on}
+        for update, _ in valid:
+            if not update.on:
+                continue
+            if limit and not device.zone_on(update.zone):
+                # sorted() is stable, so within each group the longest-lit come first
+                lit = sorted(device.zones_on, key=lambda z: z in switching_on)
+                while len(lit) >= limit:
+                    victim = lit.pop(0)
+                    frames.append(zone_power_frame(victim, False))
+                    device.set_zone_state(victim, False)
+            frames.append(zone_power_frame(update.zone, True))
+            device.set_zone_state(update.zone, True)
+        for update, zone in valid:
+            mask = 0xFF if zone.segments else None
+            if update.temperature is not None:
+                kelvin = max(min_kelvin, min(int(update.temperature), max_kelvin))
+                frames.append(
+                    zone_temperature_frame(update.zone, kelvin, rgb=zone.rgb, mask=mask)
+                )
+            elif update.rgb is not None:
+                if zone.rgb:
+                    frames.append(zone_color_frame(update.zone, update.rgb, mask))
+                else:
+                    self._logger.warning(
+                        "Zone %s of device %s has no colour", update.zone, device
+                    )
+            if update.brightness is not None:
+                frames.append(
+                    zone_brightness_frame(update.zone, update.brightness, mask)
+                )
+            if update.flow is not None:
+                if zone.flow:
+                    frames.append(zone_flow_frame(update.zone, update.flow))
+                else:
+                    self._logger.warning(
+                        "Zone %s of device %s has no flow rate", update.zone, device
+                    )
+        self._send_frames(frames, device)
+
+    async def set_zone_segments(
+        self, device: GoveeDevice, zone: int, updates: Sequence[SegmentUpdate]
+    ) -> None:
+        """Set segments within a zone (e.g. the H60B0's Side ring), merged like ``set_segments``."""
+        info = self._zone(device, zone)
+        if info is None:
+            return
+        if not info.segments:
+            self._logger.warning("Zone %s of device %s has no segments", zone, device)
+            return
+
+        def bit_of(segment: int) -> int | None:
+            if 1 <= segment <= info.segments:
+                return 1 << (segment - 1)
+            self._logger.warning(
+                "Segment %s is not valid for zone %s of device %s",
+                segment,
+                zone,
+                device,
+            )
+            return None
+
+        colors, levels = self._group_segment_updates(device, updates, bit_of)
+        frames: list[bytes] = [
+            (
+                zone_temperature_frame(zone, key[1], mask=bits)
+                if key[0] == "temperature"
+                else zone_color_frame(zone, key[1:], bits)
+            )
+            for key, bits in colors.items()
+        ]
+        frames += [
+            zone_brightness_frame(zone, level, bits) for level, bits in levels.items()
+        ]
+        self._send_frames(frames, device)
 
     async def set_scene(self, device: GoveeDevice, scene: str) -> None:
         if (

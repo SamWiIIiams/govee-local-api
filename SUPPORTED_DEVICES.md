@@ -81,7 +81,7 @@ Color temperature defaults to 2000-9000 K; models with a narrower or wider range
 | H60A1 | ✅ | ✅ | 2200-6500 | ✅ | 13 | candlelight |
 | H60A4 | ✅ | ✅ | 2000-9000 | ✅ | 11 | ❌ |
 | H60A6 | ✅ | ✅ | 2700-6500 | ✅ | - | ❌ |
-| H60B0 | ✅ | ✅ | 2000-9000 | ✅ | - | ❌ |
+| H60B0 | ✅ | ✅ | 2700-6500 | ✅ | - | ❌ |
 | H60B1 | ✅ | ✅ | 2000-9000 | ✅ | 3 | sunrise, sunset |
 | H60B2 | ✅ | ✅ | 2000-9000 | ✅ | 3 | twinkle, breathe, rainbow |
 | H60C1 | ✅ | ✅ | 2000-9000 | ✅ | 3 | sunrise, sunset, rainbow |

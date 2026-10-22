@@ -28,6 +28,22 @@ class SegmentUpdate:
     brightness: int | None = None
 
 
+@dataclass(frozen=True)
+class ZoneUpdate:
+    """One zone's change for ``GoveeDevice.set_zones``.
+
+    ``on`` switches the zone; set ``rgb`` or ``temperature`` (not both),
+    ``brightness`` (0-100) and/or ``flow`` (0-100, zones with a flow rate).
+    """
+
+    zone: int
+    on: bool | None = None
+    rgb: tuple[int, int, int] | None = None
+    temperature: int | None = None
+    brightness: int | None = None
+    flow: int | None = None
+
+
 class GoveeSegment:
     def __init__(self, is_on: bool, color: tuple[int, int, int]) -> None:
         self.is_on = is_on
@@ -62,6 +78,8 @@ class GoveeDevice:
         self._brightness = 0
         self._transport: asyncio.DatagramTransport | None = None
         self._update_callback: Callable[[GoveeDevice], None] | None = None
+        # Zones believed to be lit, longest-lit first (devices don't report them)
+        self._zones_on: list[int] = []
         self.is_manual: bool = False
 
     @property
@@ -159,6 +177,31 @@ class GoveeDevice:
     async def set_segments(self, updates: Sequence[SegmentUpdate]) -> None:
         """Apply several segment changes at once, in as few packets as possible."""
         await self._controller.set_segments(self, updates)
+
+    @property
+    def zones_on(self) -> tuple[int, ...]:
+        """Zones believed to be lit, longest-lit first."""
+        return tuple(self._zones_on)
+
+    def zone_on(self, zone: int) -> bool:
+        return zone in self._zones_on
+
+    def set_zone_state(self, zone: int, on: bool) -> None:
+        """Record a zone's state without sending anything (e.g. restored after a restart)."""
+        if zone in self._zones_on:
+            self._zones_on.remove(zone)
+        if on:
+            self._zones_on.append(zone)
+
+    async def set_zones(self, updates: Sequence[ZoneUpdate]) -> None:
+        """Switch and set zones of a multi-zone light, keeping to its zone limit."""
+        await self._controller.set_zones(self, updates)
+
+    async def set_zone_segments(
+        self, zone: int, updates: Sequence[SegmentUpdate]
+    ) -> None:
+        """Set segments within a zone, in as few packets as possible."""
+        await self._controller.set_zone_segments(self, zone, updates)
 
     async def turn_off(self) -> None:
         await self._controller.turn_on_off(self, False)
