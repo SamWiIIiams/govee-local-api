@@ -78,7 +78,8 @@ class GoveeDevice:
         self._brightness = 0
         self._transport: asyncio.DatagramTransport | None = None
         self._update_callback: Callable[[GoveeDevice], None] | None = None
-        # Zones believed to be lit, longest-lit first (devices don't report them)
+        # Zones lit while the light is on, longest-lit first (devices don't
+        # report them). Kept while the light is off: it comes back with them.
         self._zones_on: list[int] = []
         self.is_manual: bool = False
 
@@ -180,11 +181,15 @@ class GoveeDevice:
 
     @property
     def zones_on(self) -> tuple[int, ...]:
-        """Zones believed to be lit, longest-lit first."""
+        """Zones lit while the light is on, longest-lit first."""
         return tuple(self._zones_on)
 
     def zone_on(self, zone: int) -> bool:
         return zone in self._zones_on
+
+    def set_power_state(self, on: bool) -> None:
+        """Record whether the light is on without sending anything."""
+        self._is_on = on
 
     def set_zone_state(self, zone: int, on: bool) -> None:
         """Record a zone's state without sending anything (e.g. restored after a restart)."""

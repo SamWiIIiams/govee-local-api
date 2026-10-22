@@ -120,6 +120,25 @@ class TestSetZones(ZoneControllerTest):
         assert sent == ["33 30 02", "33 30 03 01"]
         assert self.device.zones_on == (RIPPLE, LOWER)
 
+    def test_switching_off_the_last_zone_powers_the_light_off(self):
+        self.device.set_power_state(True)
+        self.zones(ZoneUpdate(RIPPLE, on=True))
+        self.zones(ZoneUpdate(LOWER, on=True))
+        self.zones(ZoneUpdate(RIPPLE, on=False), ZoneUpdate(LOWER, on=False))
+        assert not self.device.on
+        # The light comes back with the zone switched off last
+        assert self.device.zones_on == (LOWER,)
+        assert not self.device.zone_on(RIPPLE)
+
+    def test_zone_lit_after_power_on_counts_towards_the_limit(self):
+        self.device.set_power_state(True)
+        self.zones(ZoneUpdate(LOWER, on=True))
+        self.zones(ZoneUpdate(LOWER, on=False))
+        # Powered back on with Lower lit; Ripple and Side make three
+        self.device.set_power_state(True)
+        self.zones(ZoneUpdate(RIPPLE, on=True))
+        assert self.zones(ZoneUpdate(SIDE, on=True)) == ["33 30 03", "33 30 02 01"]
+
     def test_restored_state_counts_towards_the_limit(self):
         self.device.set_zone_state(LOWER, True)
         self.device.set_zone_state(RIPPLE, True)

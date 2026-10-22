@@ -878,6 +878,8 @@ class GoveeController:
         Zones switched off go first. Switching a zone on while the model's
         ``max_zones_on`` zones are already lit first switches off the one lit
         longest, preferring zones that aren't switched on in the same call.
+        Switching off the last lit zone powers the light off; it comes back on
+        with that zone lit (as verified on the H60B0).
         """
         valid = [(u, z) for u in updates if (z := self._zone(device, u.zone))]
         min_kelvin, max_kelvin = device.temperature_range
@@ -886,7 +888,12 @@ class GoveeController:
         for update, _ in valid:
             if update.on is False:
                 frames.append(zone_power_frame(update.zone, False))
-                device.set_zone_state(update.zone, False)
+                if device.zones_on == (update.zone,):
+                    # Switching off the last lit zone powers the light off,
+                    # and it comes back with that zone lit when powered on.
+                    device.set_power_state(False)
+                else:
+                    device.set_zone_state(update.zone, False)
         switching_on = {u.zone for u, _ in valid if u.on}
         for update, _ in valid:
             if not update.on:
