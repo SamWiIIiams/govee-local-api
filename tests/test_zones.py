@@ -67,14 +67,21 @@ class ZoneControllerTest(unittest.TestCase):
             self.controller, "192.168.1.100", "AA:BB", "H60B0",
             GOVEE_LIGHT_CAPABILITIES["H60B0"],
         )  # fmt: skip
+        self.device.set_power_state(True)
 
     def sent(self) -> list[str]:
-        """Every frame sent, without padding or checksum."""
-        return [
-            base64.b64decode(c)[:-1].rstrip(b"\x00").hex(" ")
-            for call in self.controller._send_message.call_args_list
-            for c in call[0][0].as_dict()["msg"]["data"]["command"]
-        ]
+        """Every frame sent, without padding or checksum ("turn 1" for power-on)."""
+        out = []
+        for call in self.controller._send_message.call_args_list:
+            msg = call[0][0].as_dict()["msg"]
+            if msg["cmd"] != "ptReal":
+                out.append(f"{msg['cmd']} {msg['data']['value']}")
+                continue
+            out += [
+                base64.b64decode(c)[:-1].rstrip(b"\x00").hex(" ")
+                for c in msg["data"]["command"]
+            ]
+        return out
 
     def zones(self, *updates: ZoneUpdate) -> list[str]:
         self.controller._send_message.reset_mock()
@@ -121,7 +128,6 @@ class TestSetZones(ZoneControllerTest):
         assert self.device.zones_on == (RIPPLE, LOWER)
 
     def test_switching_off_the_last_zone_powers_the_light_off(self):
-        self.device.set_power_state(True)
         self.zones(ZoneUpdate(RIPPLE, on=True))
         self.zones(ZoneUpdate(LOWER, on=True))
         self.zones(ZoneUpdate(RIPPLE, on=False), ZoneUpdate(LOWER, on=False))
@@ -130,12 +136,39 @@ class TestSetZones(ZoneControllerTest):
         assert self.device.zones_on == (LOWER,)
         assert not self.device.zone_on(RIPPLE)
 
+    def test_zone_switched_on_while_off_powers_on_with_only_that_zone(self):
+        self.zones(ZoneUpdate(SIDE, on=True))
+        self.zones(ZoneUpdate(SIDE, on=False))
+        assert not self.device.on
+        assert self.zones(ZoneUpdate(RIPPLE, on=True, rgb=(255, 0, 0))) == [
+            "turn 1",
+            "33 30 02",
+            "33 30 03",
+            "33 30 01 01",
+            "33 05 2c 01 01 ff",
+        ]
+        assert self.device.on
+        assert self.device.zones_on == (RIPPLE,)
+
+    def test_power_on_lights_the_zones_lit_before(self):
+        self.zones(ZoneUpdate(LOWER, on=True))
+        self.zones(ZoneUpdate(RIPPLE, on=True))
+        self.device.set_power_state(False)  # e.g. switched off as a whole
+        self.controller._send_message.reset_mock()
+        asyncio.run(self.device.turn_on())
+        assert self.sent() == ["turn 1", "33 30 02", "33 30 03 01", "33 30 01 01"]
+        assert self.device.zones_on == (LOWER, RIPPLE)
+
+    def test_power_on_without_known_zones_leaves_the_light_alone(self):
+        self.device.set_power_state(False)
+        asyncio.run(self.device.turn_on())
+        assert self.sent() == ["turn 1"]
+
     def test_zone_lit_after_power_on_counts_towards_the_limit(self):
-        self.device.set_power_state(True)
         self.zones(ZoneUpdate(LOWER, on=True))
         self.zones(ZoneUpdate(LOWER, on=False))
         # Powered back on with Lower lit; Ripple and Side make three
-        self.device.set_power_state(True)
+        asyncio.run(self.device.turn_on())
         self.zones(ZoneUpdate(RIPPLE, on=True))
         assert self.zones(ZoneUpdate(SIDE, on=True)) == ["33 30 03", "33 30 02 01"]
 

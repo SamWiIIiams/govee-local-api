@@ -157,8 +157,23 @@ class GoveeDevice:
         return old_callback
 
     async def turn_on(self) -> None:
+        was_on = self._is_on
         await self._controller.turn_on_off(self, True)
         self._is_on = True
+        if not was_on and self._zones_on:
+            # Light the zones that were lit before, rather than relying on
+            # what the light brings back by itself
+            lit = self._zones_on
+            dark = [
+                zone
+                for zone in range(1, len(self._capabilities.zones) + 1)
+                if zone not in lit
+            ]
+            await self._controller.set_zones(
+                self,
+                [ZoneUpdate(zone, on=True) for zone in lit]
+                + [ZoneUpdate(zone, on=False) for zone in dark],
+            )
 
     async def set_segment_rgb_color(
         self, segment: int, red: int, green: int, blue: int

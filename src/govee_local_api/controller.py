@@ -878,23 +878,33 @@ class GoveeController:
         Zones switched off go first. Switching a zone on while the model's
         ``max_zones_on`` zones are already lit first switches off the one lit
         longest, preferring zones that aren't switched on in the same call.
-        Switching off the last lit zone powers the light off; it comes back on
-        with that zone lit (as verified on the H60B0).
+        Switching on zones while the light is off powers it on with only those
+        zones lit. Switching off the last lit zone powers the light off (as
+        verified on the H60B0); the zone is remembered for ``turn_on``.
         """
         valid = [(u, z) for u in updates if (z := self._zone(device, u.zone))]
         min_kelvin, max_kelvin = device.temperature_range
         limit = device.capabilities.max_zones_on
         frames: list[bytes] = []
-        for update, _ in valid:
-            if update.on is False:
-                frames.append(zone_power_frame(update.zone, False))
-                if device.zones_on == (update.zone,):
-                    # Switching off the last lit zone powers the light off,
-                    # and it comes back with that zone lit when powered on.
-                    device.set_power_state(False)
-                else:
-                    device.set_zone_state(update.zone, False)
         switching_on = {u.zone for u, _ in valid if u.on}
+        if switching_on and not device.on:
+            # What a light brings back by itself when powered on isn't
+            # reliable, so light exactly the zones asked for.
+            self._send_message(OnOffMessage(True), device)
+            device.set_power_state(True)
+            for number in range(1, len(device.capabilities.zones) + 1):
+                if number not in switching_on:
+                    frames.append(zone_power_frame(number, False))
+                device.set_zone_state(number, False)
+        else:
+            for update, _ in valid:
+                if update.on is False:
+                    frames.append(zone_power_frame(update.zone, False))
+                    if device.zones_on == (update.zone,):
+                        # Switching off the last lit zone powers the light off
+                        device.set_power_state(False)
+                    else:
+                        device.set_zone_state(update.zone, False)
         for update, _ in valid:
             if not update.on:
                 continue
